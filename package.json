@@ -1,0 +1,28 @@
+{
+  "name": "hf-token-farmer",
+  "version": "1.0.0",
+  "description": "Autonomous Hugging Face account and ZeroGPU token generator with 2Captcha hCaptcha auto-solving, Guerrilla Mail, and headless Linux Xvfb support.",
+  "main": "auto_reg_hf.js",
+  "type": "module",
+  "scripts": {
+    "start": "node dashboard.js",
+    "farm": "node auto_reg_hf.js --count=5",
+    "farm:linux": "xvfb-run -a node auto_reg_hf.js --count=5"
+  },
+  "keywords": [
+    "huggingface",
+    "zerogpu",
+    "token-generator",
+    "2captcha",
+    "hcaptcha",
+    "playwright",
+    "xvfb",
+    "automation"
+  ],
+  "author": "tdat-dev",
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "playwright": "^1.49.1"
+  }
+}

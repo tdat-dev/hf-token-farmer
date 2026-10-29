@@ -1,0 +1,16 @@
+version: "3.8"
+
+services:
+  vanta-token-farmer:
+    build: .
+    container_name: vanta-token-farmer
+    restart: always
+    ports:
+      - "3333:3333"
+    environment:
+      - TWOCAPTCHA_API_KEY=${TWOCAPTCHA_API_KEY}
+      - PORT=3333
+    volumes:
+      - ./tokens.txt:/app/tokens.txt
+      - ./output:/app/output
+    shm_size: "2gb" # Crucial for Chromium to prevent crashes
