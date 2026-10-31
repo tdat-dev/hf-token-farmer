@@ -1,9 +1,30 @@
+# Node & Dependencies
 node_modules/
-.env
-.env.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Database & Token Storage (CRITICAL - DO NOT LEAK)
+tokens.db*
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
 tokens.txt
+*.token
+*.key
+
+# Environment & Credentials
+.env*
+!.env.example
+
+# Temporary & Output Files
 /tmp/
 output/
 extensions/
 .DS_Store
 *.log
+*.png
+*.jpg
+*.jpeg

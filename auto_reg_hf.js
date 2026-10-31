@@ -1,14 +1,15 @@
 import { chromium } from "playwright";
 import fs from "fs";
+import os from "os";
 import path from "path";
 import https from "https";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
+import { insertAccount } from "./db.js";
 
 dotenv.config();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const TOKENS_FILE = path.join(__dirname, "tokens.txt");
 
 const sleep = ms => new Promise(res => setTimeout(res, ms));
 
@@ -25,6 +26,15 @@ function getChromeExecutable() {
       "/usr/bin/chromium"
     ];
     for (const p of linuxPaths) {
+      if (fs.existsSync(p)) return p;
+    }
+  } else if (process.platform === "win32") {
+    const winPaths = [
+      "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+      "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+      path.join(process.env.LOCALAPPDATA || "", "Google\\Chrome\\Application\\chrome.exe")
+    ];
+    for (const p of winPaths) {
       if (fs.existsSync(p)) return p;
     }
   }
@@ -160,6 +170,41 @@ function postJson(url, body) {
 
 async function solveHcaptchaWith2Captcha() {
   console.log("   🤖 [2Captcha API] Đang gửi yêu cầu giải hCaptcha lên máy chủ 2Captcha...");
+
+  // 1. Thử V1 API (chuẩn cho classic API key 32 ký tự hex)
+  try {
+    const v1Url = `https://2captcha.com/in.php?key=${TWOCAPTCHA_API_KEY}&method=hcaptcha&sitekey=${HCAPTCHA_SITEKEY}&pageurl=https://huggingface.co/join&json=1`;
+    const initV1 = await getJson(v1Url);
+    if (initV1 && initV1.status === 1 && initV1.request) {
+      const taskId = initV1.request;
+      console.log(`   ⏳ [2Captcha V1 API] Task ID: ${taskId}. Đang đợi hệ thống giải tự động 100%...`);
+      const start = Date.now();
+      let lastLoggedSec = 0;
+      while ((Date.now() - start) < 180000) {
+        await sleep(3500);
+        const poll = await getJson(`https://2captcha.com/res.php?key=${TWOCAPTCHA_API_KEY}&action=get&id=${taskId}&json=1`);
+        if (poll && poll.status === 1) {
+          const elapsed = Math.round((Date.now() - start) / 1000);
+          console.log(`   🎉 [2Captcha API] Đã giải thành công trong ${elapsed}s!`);
+          return { token: poll.request, respKey: poll.request };
+        }
+        if (poll && poll.request === "CAPCHA_NOT_READY") {
+          const elapsed = Math.round((Date.now() - start) / 1000);
+          if (elapsed - lastLoggedSec >= 10) {
+            lastLoggedSec = elapsed;
+            console.log(`   ⏳ [2Captcha API] Đang xử lý câu đố tự động... (${elapsed}s/180s)`);
+          }
+        } else {
+          throw new Error(`2Captcha V1 Error: ${JSON.stringify(poll)}`);
+        }
+      }
+      throw new Error("2Captcha V1 timeout sau 180 giây.");
+    }
+  } catch (err) {
+    console.warn(`   ⚠️ [2Captcha V1 fallback] ${err.message}. Đang thử V2 API...`);
+  }
+
+  // 2. Fallback sang V2 API (nếu dùng V2 clientKey)
   const create = await postJson("https://api.2captcha.com/createTask", {
     clientKey: TWOCAPTCHA_API_KEY,
     task: {
@@ -174,7 +219,7 @@ async function solveHcaptchaWith2Captcha() {
   }
 
   const taskId = create.taskId;
-  console.log(`   ⏳ [2Captcha API] Task ID: ${taskId}. Đang đợi hệ thống giải tự động 100%...`);
+  console.log(`   ⏳ [2Captcha V2 API] Task ID: ${taskId}. Đang đợi hệ thống giải tự động 100%...`);
 
   const start = Date.now();
   let lastLoggedSec = 0;
@@ -219,14 +264,14 @@ async function registerOneAccount(accountIndex, total) {
   // Bắt đầu gọi 2Captcha giải câu đố song song ngay từ đầu để tiết kiệm thời gian
   const captchaPromise = solveHcaptchaWith2Captcha();
 
-  const profileDir = path.join("/tmp", `vanta_profile_${Date.now()}`);
+  const profileDir = path.join(os.tmpdir(), `vanta_profile_${Date.now()}`);
 
   const chromeExec = getChromeExecutable();
   console.log(`2. Đang khởi chạy trình duyệt: ${chromeExec || 'Playwright Chromium'}...`);
 
   const launchOptions = {
-    headless: false,
-    slowMo: 30,
+    headless: process.platform === "linux" ? true : false,
+    slowMo: process.platform === "linux" ? 10 : 30,
     args: [
       "--disable-blink-features=AutomationControlled",
       "--no-sandbox",
@@ -237,7 +282,12 @@ async function registerOneAccount(accountIndex, total) {
       "--no-default-browser-check",
     ],
     viewport: { width: 1280, height: 800 },
+    userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
   };
+
+  if (process.platform === "linux") {
+    launchOptions.args.push("--proxy-server=socks5://127.0.0.1:40000");
+  }
 
   if (chromeExec) {
     launchOptions.executablePath = chromeExec;
@@ -247,7 +297,7 @@ async function registerOneAccount(accountIndex, total) {
 
   // Tiêm hook hCaptcha vào trình duyệt trước khi tải trang
   await context.addInitScript(() => {
-    Object.defineProperty(navigator, "webdriver", { get: () => false });
+    Object.defineProperty(navigator, "webdriver", { get: () => undefined });
 
     window.__inject2CaptchaToken = (token, respKey) => {
       window.__solvedToken = token;
@@ -289,11 +339,17 @@ async function registerOneAccount(accountIndex, total) {
     // Bước 1: Điền email & password
     await page.waitForSelector("input[name='email']", { timeout: 120000 });
     console.log("4. Tự động điền Email & Mật khẩu...");
-    await page.fill("input[name='email']", mailData.email);
-    await page.fill("input[name='password']", mailData.password);
+    const emailInput = page.locator("input[name='email']");
+    await emailInput.click();
+    await emailInput.pressSequentially(mailData.email, { delay: 15 });
+
+    const passInput = page.locator("input[name='password']");
+    await passInput.click();
+    await passInput.pressSequentially(mailData.password, { delay: 15 });
     
-    // Bấm nút Next để sang bước 2
-    await page.click("button[type='submit']");
+    await sleep(600);
+    // Bấm nút Next để sang bước 2 (hoặc gõ Enter)
+    await passInput.press("Enter");
 
     // Chờ chuyển sang Bước 2 (Username)
     await page.waitForSelector("input[name='username']", { timeout: 120000 });
@@ -302,17 +358,13 @@ async function registerOneAccount(accountIndex, total) {
     console.log("5. Tự động điền Username chuẩn & đồng ý Điều khoản...");
     const username = "vanta" + Date.now().toString().slice(-4) + Math.floor(Math.random() * 899 + 100);
     
-    await page.$eval("input[name='username']", (el, val) => {
-      el.value = val;
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-      el.dispatchEvent(new Event("change", { bubbles: true }));
-    }, username);
+    const usernameInput = page.locator("input[name='username']");
+    await usernameInput.click();
+    await usernameInput.pressSequentially(username, { delay: 15 });
 
-    await page.$eval("input[name='fullname']", (el) => {
-      el.value = "Vanta Creator";
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-      el.dispatchEvent(new Event("change", { bubbles: true }));
-    });
+    const fullnameInput = page.locator("input[name='fullname']");
+    await fullnameInput.click();
+    await fullnameInput.pressSequentially("Vanta Creator", { delay: 15 });
 
     const checkbox = await page.$("input[type='checkbox']");
     if (checkbox) await checkbox.check();
@@ -373,7 +425,12 @@ async function registerOneAccount(accountIndex, total) {
     }
 
     if (!submitted) {
-      throw new Error("Không thể xác nhận chuyển trang sau khi bấm Create Account.");
+      const errText = await page.$$eval(".text-red-500, [role='alert'], .text-error, form div.text-red-600, form p.text-red-500", els => els.map(e => e.innerText)).catch(() => []);
+      const pageText = await page.innerText("form").catch(() => "");
+      await page.screenshot({ path: path.join(os.tmpdir(), "hf_submit_failed.png") }).catch(() => {});
+      console.log("   [Debug] Form content sau khi bấm submit:\n", pageText.slice(0, 500));
+      console.log("   [Debug] Lỗi hiển thị trên form:", errText);
+      throw new Error(`Không thể xác nhận chuyển trang sau khi bấm Create Account. Lỗi: ${JSON.stringify(errText)}`);
     }
 
     console.log("🎉 ĐÃ TỰ ĐỘNG VƯỢT CAPTCHA THÀNH CÔNG (0 thao tác thủ công)!");
@@ -536,13 +593,25 @@ async function registerOneAccount(accountIndex, total) {
     if (!tokenVal || !tokenVal.startsWith("hf_")) {
       const textPreview = await safeEval(() => document.body ? document.body.innerText.slice(0, 500) : "", "");
       console.log("   [DEBUG Token Form]:", textPreview.replace(/\n+/g, " "));
-      await page.screenshot({ path: "/tmp/hf_token_fail.png" }).catch(() => {});
-      throw new Error(`Token không hợp lệ. Đã lưu ảnh chụp giao diện tại /tmp/hf_token_fail.png`);
+      await page.screenshot({ path: path.join(os.tmpdir(), "hf_token_fail.png") }).catch(() => {});
+      throw new Error(`Token không hợp lệ. Đã lưu ảnh chụp giao diện tại ${path.join(os.tmpdir(), "hf_token_fail.png")}`);
     }
 
     console.log(`\n🎉 THÀNH CÔNG! TOKEN ĐÃ TẠO: ${tokenVal}`);
-    fs.appendFileSync(TOKENS_FILE, `\n${tokenVal}\n`);
-    console.log(`✅ Đã tự động lưu vào ${TOKENS_FILE}`);
+    try {
+      insertAccount({
+        token: tokenVal,
+        email: mailData?.email || "",
+        password: mailData?.password || "",
+        username: username || "",
+        token_name: tokenName || "",
+        status: "active",
+        notes: "Auto-farmed via Playwright & 2Captcha"
+      });
+      console.log(`✅ Đã tự động lưu vào DATABASE (tokens.db)`);
+    } catch (dbErr) {
+      console.error(`⚠️ Lỗi ghi Database: ${dbErr.message}`);
+    }
 
     return tokenVal;
 
