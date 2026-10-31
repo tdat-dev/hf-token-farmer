@@ -7,12 +7,6 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DB_PATH = process.env.TOKENS_DB_PATH || process.env.DB_PATH || path.join(__dirname, "tokens.db");
 const TOKENS_FILE = path.join(__dirname, "tokens.txt");
 
-// External linked databases to keep in sync (e.g. MCP pool)
-const SYNC_TARGET_PATHS = [
-  "D:\\vanta_zerogpu_tools\\vanta-motion-mcp\\tokens.db",
-  "D:\\vantavid\\vanta-motion-mcp\\tokens.db"
-];
-
 // Khởi tạo Database SQLite Node.js native
 const db = new DatabaseSync(DB_PATH);
 
@@ -64,30 +58,6 @@ export function insertAccount({ token, email = "", password = "", username = "",
   `);
 
   const result = stmt.run(cleanToken, email, password, username, token_name, notes, status);
-
-  // 2. Tự động đồng bộ vào các MCP pool database nếu tồn tại trên máy
-  for (const syncPath of SYNC_TARGET_PATHS) {
-    if (path.resolve(syncPath) !== path.resolve(DB_PATH) && fs.existsSync(syncPath)) {
-      try {
-        const syncDb = new DatabaseSync(syncPath);
-        syncDb.prepare(`
-          INSERT INTO accounts (token, email, password, username, token_name, notes, status, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
-          ON CONFLICT(token) DO UPDATE SET
-            email = COALESCE(NULLIF(excluded.email, ''), accounts.email),
-            password = COALESCE(NULLIF(excluded.password, ''), accounts.password),
-            username = COALESCE(NULLIF(excluded.username, ''), accounts.username),
-            token_name = COALESCE(NULLIF(excluded.token_name, ''), accounts.token_name),
-            notes = COALESCE(NULLIF(excluded.notes, ''), accounts.notes),
-            status = excluded.status
-        `).run(cleanToken, email, password, username, token_name, notes, status);
-        syncDb.close();
-      } catch (e) {
-        // bỏ qua lỗi target sync để không cản trở flow chính
-      }
-    }
-  }
-
   return result;
 }
 
